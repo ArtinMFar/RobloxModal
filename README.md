@@ -141,5 +141,7 @@ Settings → Advanced → Forget saved settings removes it from the browser.
 from its releases page when the image is built, not included here.
 [cage](https://github.com/cage-kiosk/cage) (MIT) is rebuilt with a small patch when the image is
 built. [wayvnc](https://github.com/any1/wayvnc) (ISC) serves the screen.
-[noVNC](https://github.com/novnc/noVNC) (MPL-2.0) shows it in the page. Not affiliated with
+[noVNC](https://github.com/novnc/noVNC) (MPL-2.0) shows it in the page; one line of
+`assets/vendor/novnc/core/util/browser.js` is changed (marked there) so it loads on phones whose
+video decoder never answers. Not affiliated with
 Roblox or Modal.

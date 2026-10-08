@@ -149,7 +149,12 @@ async function _checkWebCodecsH264DecodeSupport() {
 
     return true;
 }
-supportsWebCodecsH264Decode = await _checkWebCodecsH264DecodeSupport();
+// Roblox on Modal change: the upstream line here is
+//   supportsWebCodecsH264Decode = await _checkWebCodecsH264DecodeSupport();
+// which decodes a test frame at module load and waits for the result. On some Android phones
+// that never finishes, and nothing that imports noVNC ever runs. wayvnc does not send H.264
+// here, so the check is skipped and H.264 stays off.
+supportsWebCodecsH264Decode = false;
 
 /*
  * The functions for detection of platforms and browsers below are exported

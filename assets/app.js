@@ -3,16 +3,22 @@ import { DEFAULT_RELAY } from "./config.js";
 // The VNC viewer (noVNC) is about 50 files; it loads when a session starts, so the rest of the
 // page works straight away and keeps working if the viewer cannot load.
 let novnc = null;
+let viewerLoading = null;
 async function loadViewer() {
-  if (!novnc) {
-    const [rfb, defs, table] = await Promise.all([
-      import("./vendor/novnc/core/rfb.js"),
-      import("./vendor/novnc/core/input/keysymdef.js"),
-      import("./vendor/novnc/core/input/keysym.js"),
-    ]);
-    novnc = { RFB: rfb.default, keysyms: defs.default, KeyTable: table.default };
+  if (novnc) return novnc;
+  viewerLoading ??= Promise.all([
+    import("./vendor/novnc/core/rfb.js"),
+    import("./vendor/novnc/core/input/keysymdef.js"),
+    import("./vendor/novnc/core/input/keysym.js"),
+  ]).then(([rfb, defs, table]) => (novnc = { RFB: rfb.default, keysyms: defs.default, KeyTable: table.default }));
+  const tooLong = new Promise((_, reject) =>
+    setTimeout(() => reject(new Error("The viewer took more than 20 seconds to load.")), 20000));
+  try {
+    return await Promise.race([viewerLoading, tooLong]);
+  } catch (e) {
+    if (!novnc) viewerLoading = null; // let the next try start over
+    throw e;
   }
-  return novnc;
 }
 
 const $ = (id) => document.getElementById(id);
@@ -308,7 +314,8 @@ function enterPlayer(session) {
   leavePlayer({ keepView: true });
   writeStore("sessionStorage", SESSION_KEY, session);
   const mode = session.mode === "mobile" ? "mobile" : "pc";
-  current = { session, mode, rfb: null, touch: null, failures: 0, alive: true, phase: "", connected: false, blankRetries: 0 };
+  current = { session, mode, rfb: null, touch: null, failures: 0, alive: true, phase: "", connected: false,
+    blankRetries: 0, attempts: 0, connectStarted: 0, lastProblem: "" };
   $("player").classList.toggle("mobile", mode === "mobile");
   $("touch-layer").hidden = mode !== "mobile";
   $("tb-items").hidden = true;
@@ -335,52 +342,80 @@ function leavePlayer({ keepView = false } = {}) {
 
 async function statusLoop(c) {
   while (c.alive) {
-    let st;
     try {
-      st = await sessionFetch(c.session, "/status");
-      c.failures = 0;
-    } catch {
-      if (++c.failures >= 4) {
-        if (!c.alive) return;
-        writeStore("sessionStorage", SESSION_KEY, null);
-        leavePlayer();
-        homeMsg("The session has ended.", "error");
-        refreshHome();
-        return;
-      }
-      await sleep(2000);
-      continue;
-    }
-    if (!c.alive) return;
-    const phase = st.phase;
-    c.phase = phase;
-    if (phase === "exited") {
-      overlay("Roblox stopped", st.message, { spinner: false, restart: true });
-    } else if (phase === "stopping") {
-      overlay("Session ending", st.message, { spinner: false });
-    } else if (phase === "loading") {
-      overlay("Roblox is loading", "This takes 10-60 seconds, depending on the cores");
-    } else if (phase === "ready") {
-      // Only now: a viewer that connects before Roblox's first screen is drawn can be left
-      // looking at the empty window until something else on screen changes.
-      if (!c.rfb) {
-        try {
-          await loadViewer();
-        } catch (e) {
-          overlay("Could not load the viewer", `${e.message} Reload the page to try again.`, { spinner: false });
-          await sleep(4000);
-          continue;
-        }
-        if (c.alive && !c.rfb) connectVnc(c);
-      } else if (c.connected) hideOverlay();
-    } else {
-      overlay(phase === "downloading" ? "Downloading Roblox" : "Starting Roblox", st.message);
+      await statusStep(c);
+    } catch (e) {
+      // Never let one failure freeze the player on a stale message: say what it was, carry on.
+      overlay("Something went wrong", `${e?.message || e}. Retrying.`, { spinner: false });
+      if (c.rfb && !c.connected) dropViewer(c);
     }
     await sleep(c.rfb ? 4000 : 1500);
   }
 }
 
+async function statusStep(c) {
+  let st;
+  try {
+    st = await sessionFetch(c.session, "/status");
+    c.failures = 0;
+  } catch {
+    if (++c.failures >= 4 && c.alive) {
+      writeStore("sessionStorage", SESSION_KEY, null);
+      leavePlayer();
+      homeMsg("The session has ended.", "error");
+      refreshHome();
+    }
+    return;
+  }
+  if (!c.alive) return;
+  const phase = st.phase;
+  c.phase = phase;
+  if (phase === "exited") {
+    overlay("Roblox stopped", st.message, { spinner: false, restart: true });
+  } else if (phase === "stopping") {
+    overlay("Session ending", st.message, { spinner: false });
+  } else if (phase === "loading") {
+    overlay("Roblox is loading", "This takes 10-60 seconds, depending on the cores");
+  } else if (phase === "ready") {
+    // Only now: a viewer that connects before Roblox's first screen is drawn can be left
+    // looking at the empty window until something else on screen changes.
+    if (c.connected) return hideOverlay();
+    if (c.rfb) {
+      if (Date.now() - c.connectStarted > 15000) {
+        c.lastProblem = "no answer from the session after 15 seconds";
+        dropViewer(c);
+      }
+      return;
+    }
+    overlay("Loading the viewer", "");
+    try {
+      await loadViewer();
+    } catch (e) {
+      overlay("Could not load the viewer", `${e.message} Reload the page to try again.`, { spinner: false });
+      return;
+    }
+    if (c.alive && !c.rfb && !c.connected) connectVnc(c);
+  } else {
+    overlay(phase === "downloading" ? "Downloading Roblox" : "Starting Roblox", st.message);
+  }
+}
+
+function dropViewer(c) {
+  const rfb = c.rfb;
+  c.rfb = null;
+  c.connected = false;
+  try {
+    rfb?.disconnect();
+  } catch {
+    /* already closed */
+  }
+}
+
 function connectVnc(c) {
+  c.attempts += 1;
+  c.connectStarted = Date.now();
+  overlay("Connecting to the picture",
+    c.attempts > 1 ? `Attempt ${c.attempts}. Last time: ${c.lastProblem || "the connection closed"}.` : "");
   const url = `${c.session.url.replace(/^http/, "ws")}/vnc?k=${encodeURIComponent(c.session.key)}`;
   const rfb = new novnc.RFB($("screen"), url, { wsProtocols: ["binary"] });
   c.rfb = rfb;
@@ -392,18 +427,21 @@ function connectVnc(c) {
   rfb.focusOnClick = c.mode === "pc";
   rfb.background = "#000";
   rfb.addEventListener("connect", () => {
+    if (c.rfb !== rfb) return;
     c.connected = true;
     hideOverlay();
     setTimeout(() => recheckBlank(c, rfb), 4000);
     if (c.mode === "pc") rfb.focus();
     if (c.mode === "mobile") connectTouch(c);
   });
-  rfb.addEventListener("disconnect", () => {
+  rfb.addEventListener("disconnect", (e) => {
+    if (c.rfb !== rfb) return; // one we already gave up on
     c.connected = false;
-    if (c.rfb === rfb) c.rfb = null;
+    c.rfb = null;
     if (!c.alive) return;
-    overlay("Reconnecting", "The picture dropped; reconnecting");
-    // statusLoop reconnects on its next pass while Roblox is up.
+    c.lastProblem = e.detail?.clean ? "the session closed it" : "it closed unexpectedly";
+    overlay("Reconnecting", `The picture connection dropped (${c.lastProblem}).`);
+    // statusLoop connects again on its next pass while Roblox is up.
   });
 }
 
@@ -428,6 +466,7 @@ function recheckBlank(c, rfb) {
   }
   if (hi - lo < 12) {
     c.blankRetries += 1;
+    c.lastProblem = "the picture was blank";
     rfb.disconnect(); // statusLoop connects again
   }
 }
@@ -573,6 +612,15 @@ function toggleFullscreen() {
     .then(() => current?.mode === "mobile" && screen.orientation?.lock?.("landscape"))
     .catch(() => {});
 }
+
+// Errors on screen rather than only in a console nobody on a phone can open. While playing, the
+// next status check hides the message again if the picture is still up.
+function reportError(message) {
+  if (!$("player").hidden) overlay("Something went wrong", message, { spinner: false });
+  else homeMsg(`Something went wrong: ${message}`, "error");
+}
+window.addEventListener("error", (e) => reportError(e.message || "unknown error"));
+window.addEventListener("unhandledrejection", (e) => reportError(e.reason?.message || String(e.reason)));
 
 function init() {
   $("open-settings").addEventListener("click", () => openSettings());

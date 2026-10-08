@@ -31,7 +31,7 @@ import modal
 APP_NAME = "roblox-modal"
 VOLUME_NAME = "roblox-modal-data"  # the Roblox Android build, downloaded on first use
 REGISTRY_NAME = "roblox-modal-sessions"  # running sessions, so the site can find and stop them
-VERSION = "8"  # bump when this file changes, so the relay redeploys it
+VERSION = "10"  # bump when this file changes, so the relay redeploys it
 
 CORDIAL_VERSION = "0.27.0"  # the first release whose touch input does not crash
 CORDIAL_DEB = (
@@ -356,6 +356,7 @@ class Session:
         self.anchor = None
         self.touch_conn = None
         self.run = 0  # which launch of Roblox this is; Restart starts a new one
+        self.unsticks = 0  # automatic restarts after Roblox froze while loading
 
     # -------------------------------------------------------------------------------- Roblox
 
@@ -398,6 +399,30 @@ class Session:
                 self.set_phase("ready", "Roblox is running")
 
         asyncio.get_running_loop().call_later(seconds, mark)
+
+    def unstick_later(self, seconds: float) -> None:
+        """Roblox sometimes freezes on its loading screen (Cordial's launcher restarts it too).
+
+        Normally it shows its first screen 10-25 seconds after starting. If it hasn't after
+        `seconds`, start it again, twice at most; after that, show whatever is on screen.
+        """
+        import asyncio
+
+        run = self.run
+
+        async def check() -> None:
+            await asyncio.sleep(seconds)
+            if run != self.run or self.state["phase"] != "loading":
+                return
+            if self.unsticks >= 2:
+                self.set_phase("ready", "Roblox is running (it may still be loading)")
+                return
+            self.unsticks += 1
+            self.set_phase("restarting", f"Roblox froze while loading; restarting it ({self.unsticks} of 2)")
+            await self.stop_roblox()
+            await self.start_roblox()
+
+        asyncio.get_running_loop().create_task(check())
 
     async def ensure_build(self) -> str:
         """The Roblox Android build, downloaded into the Volume on first use."""
@@ -500,7 +525,7 @@ class Session:
             open(GO, "w").close()
             self.run += 1
             self.set_phase("loading", "Roblox is loading")
-            self.ready_later(120)  # in case Roblox never names a screen
+            self.unstick_later(75)
             asyncio.create_task(self.watch_exit(proc))
         except Exception as e:  # shown on the site; the session stays up so it can be read
             self.set_phase("exited", f"Could not start Roblox: {e}")
@@ -624,6 +649,7 @@ class Session:
             if request.method == "OPTIONS":
                 resp = web.Response()
             elif not hmac.compare_digest(request.query.get("k", ""), self.key):
+                self.note(f"[session] refused {request.path}: wrong session key")
                 resp = web.json_response({"error": "wrong session key"}, status=403)
             else:
                 resp = await handler(request)
@@ -693,24 +719,32 @@ class Session:
 
         ws = web.WebSocketResponse(protocols=("binary",), max_msg_size=0, heartbeat=20)
         await ws.prepare(request)
+        browser = request.headers.get("User-Agent", "?")[:120]
         try:
             if "wayvnc" not in self.procs:
                 raise OSError("not ready")
             reader, writer = await asyncio.open_connection("127.0.0.1", VNC_PORT)
         except OSError:
+            self.note(f"[session] viewer turned away, Roblox not up yet ({browser})")
             await ws.close(code=4000, message=b"not ready")
             return ws
         self.state["viewers"] += 1
+        began = time.time()
+        sent = received = 0
+        self.note(f"[session] viewer connected ({browser})")
 
         async def downstream():
+            nonlocal sent
             while data := await reader.read(65536):
                 await ws.send_bytes(data)
+                sent += len(data)
             await ws.close()
 
         task = asyncio.create_task(downstream())
         try:
             async for msg in ws:
                 if msg.type == WSMsgType.BINARY:
+                    received += len(msg.data)
                     writer.write(msg.data)
                     await writer.drain()
         except (ConnectionError, OSError):
@@ -720,6 +754,8 @@ class Session:
             writer.close()
             self.state["viewers"] -= 1
             self.last_viewer_at = time.time()
+            self.note(f"[session] viewer left after {time.time() - began:.0f} s: {sent} bytes of picture "
+                      f"sent, {received} bytes received, close code {ws.close_code}")
         return ws
 
     async def ws_touch(self, request):
@@ -729,6 +765,8 @@ class Session:
         ids: dict[str, int] = {}  # the browser's pointer ids -> small touch ids
         ws = web.WebSocketResponse(heartbeat=20)
         await ws.prepare(request)
+        self.note("[session] touch channel connected")
+        touches = 0
         try:
             async for msg in ws:
                 if msg.type != WSMsgType.TEXT:
@@ -749,6 +787,7 @@ class Session:
                 elif finger not in ids:
                     continue
                 tid = ids.pop(finger) if verb == "u" else ids[finger]
+                touches += verb == "d"
                 try:
                     await self.touch(f"{verb} {tid} {x:.5f} {y:.5f}" if verb != "u" else f"u {tid}")
                 except OSError:
@@ -759,6 +798,7 @@ class Session:
                     await self.touch(f"u {tid}")
                 except OSError:
                     pass
+            self.note(f"[session] touch channel closed after {touches} touches")
         return ws
 
     async def http_restart(self, request):
@@ -769,6 +809,7 @@ class Session:
         if self.state["phase"] in ("starting", "downloading", "launching", "restarting", "stopping"):
             return web.json_response({"ok": False, "phase": self.state["phase"]})
         self.set_phase("restarting", "Restarting Roblox")
+        self.unsticks = 0
         await self.stop_roblox()
         asyncio.create_task(self.start_roblox())
         return web.json_response({"ok": True})
