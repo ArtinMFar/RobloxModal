@@ -1,7 +1,19 @@
-import RFB from "./vendor/novnc/core/rfb.js";
-import keysyms from "./vendor/novnc/core/input/keysymdef.js";
-import KeyTable from "./vendor/novnc/core/input/keysym.js";
 import { DEFAULT_RELAY } from "./config.js";
+
+// The VNC viewer (noVNC) is about 50 files; it loads when a session starts, so the rest of the
+// page works straight away and keeps working if the viewer cannot load.
+let novnc = null;
+async function loadViewer() {
+  if (!novnc) {
+    const [rfb, defs, table] = await Promise.all([
+      import("./vendor/novnc/core/rfb.js"),
+      import("./vendor/novnc/core/input/keysymdef.js"),
+      import("./vendor/novnc/core/input/keysym.js"),
+    ]);
+    novnc = { RFB: rfb.default, keysyms: defs.default, KeyTable: table.default };
+  }
+  return novnc;
+}
 
 const $ = (id) => document.getElementById(id);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -28,23 +40,26 @@ const defaults = () => ({
   relay: DEFAULT_RELAY,
 });
 
+// `store` is "localStorage" or "sessionStorage". A browser that blocks site data can throw on
+// merely reading window.localStorage, so even that happens inside the try: without storage,
+// settings last for this page only.
 function readStore(store, key) {
   try {
-    return JSON.parse(store.getItem(key) || "null");
+    return JSON.parse(window[store].getItem(key) || "null");
   } catch {
     return null;
   }
 }
 function writeStore(store, key, value) {
   try {
-    if (value === null) store.removeItem(key);
-    else store.setItem(key, JSON.stringify(value));
+    if (value === null) window[store].removeItem(key);
+    else window[store].setItem(key, JSON.stringify(value));
   } catch {
-    /* private mode: settings last for this page only */
+    /* storage blocked */
   }
 }
 
-let settings = { ...defaults(), ...(readStore(localStorage, SETTINGS_KEY) || {}) };
+let settings = { ...defaults(), ...(readStore("localStorage", SETTINGS_KEY) || {}) };
 const haveToken = () => settings.tokenId.trim() && settings.tokenSecret.trim();
 const creds = () => ({ token_id: settings.tokenId.trim(), token_secret: settings.tokenSecret.trim() });
 
@@ -190,7 +205,7 @@ function saveSettingsFromForm(event) {
     quality: Math.round(num("quality", 0, 9, 6)),
     relay: $("relay").value.trim() || DEFAULT_RELAY,
   };
-  writeStore(localStorage, SETTINGS_KEY, settings);
+  writeStore("localStorage", SETTINGS_KEY, settings);
   $("settings").close();
   homeMsg("Settings saved.", "ok");
   refreshHome();
@@ -291,7 +306,7 @@ const hideOverlay = () => ($("player-overlay").hidden = true);
 
 function enterPlayer(session) {
   leavePlayer({ keepView: true });
-  writeStore(sessionStorage, SESSION_KEY, session);
+  writeStore("sessionStorage", SESSION_KEY, session);
   const mode = session.mode === "mobile" ? "mobile" : "pc";
   current = { session, mode, rfb: null, touch: null, failures: 0, alive: true, phase: "", connected: false, blankRetries: 0 };
   $("player").classList.toggle("mobile", mode === "mobile");
@@ -299,6 +314,7 @@ function enterPlayer(session) {
   $("tb-items").hidden = true;
   showView("player");
   overlay("Starting Roblox", "Waiting for the session");
+  loadViewer().catch(() => {}); // start fetching it now; statusLoop reports a failure
   statusLoop(current);
 }
 
@@ -326,7 +342,7 @@ async function statusLoop(c) {
     } catch {
       if (++c.failures >= 4) {
         if (!c.alive) return;
-        writeStore(sessionStorage, SESSION_KEY, null);
+        writeStore("sessionStorage", SESSION_KEY, null);
         leavePlayer();
         homeMsg("The session has ended.", "error");
         refreshHome();
@@ -347,8 +363,16 @@ async function statusLoop(c) {
     } else if (phase === "ready") {
       // Only now: a viewer that connects before Roblox's first screen is drawn can be left
       // looking at the empty window until something else on screen changes.
-      if (!c.rfb) connectVnc(c);
-      else if (c.connected) hideOverlay();
+      if (!c.rfb) {
+        try {
+          await loadViewer();
+        } catch (e) {
+          overlay("Could not load the viewer", `${e.message} Reload the page to try again.`, { spinner: false });
+          await sleep(4000);
+          continue;
+        }
+        if (c.alive && !c.rfb) connectVnc(c);
+      } else if (c.connected) hideOverlay();
     } else {
       overlay(phase === "downloading" ? "Downloading Roblox" : "Starting Roblox", st.message);
     }
@@ -358,7 +382,7 @@ async function statusLoop(c) {
 
 function connectVnc(c) {
   const url = `${c.session.url.replace(/^http/, "ws")}/vnc?k=${encodeURIComponent(c.session.key)}`;
-  const rfb = new RFB($("screen"), url, { wsProtocols: ["binary"] });
+  const rfb = new novnc.RFB($("screen"), url, { wsProtocols: ["binary"] });
   c.rfb = rfb;
   rfb.scaleViewport = true;
   rfb.resizeSession = false;
@@ -479,8 +503,9 @@ function setupKeyboard() {
   const press = (keysym) => current?.rfb?.sendKey(keysym, null);
   const flush = () => {
     const v = box.value;
-    if (v === "") press(KeyTable.XK_BackSpace);
-    else for (const ch of v.slice(1)) press(keysyms.lookup(ch.codePointAt(0)));
+    if (!novnc) return reset();
+    if (v === "") press(novnc.KeyTable.XK_BackSpace);
+    else for (const ch of v.slice(1)) press(novnc.keysyms.lookup(ch.codePointAt(0)));
     reset();
   };
   box.addEventListener("input", (e) => {
@@ -488,8 +513,10 @@ function setupKeyboard() {
   });
   box.addEventListener("compositionend", flush);
   box.addEventListener("keydown", (e) => {
-    const special = { Enter: KeyTable.XK_Return, Tab: KeyTable.XK_Tab, Escape: KeyTable.XK_Escape,
-      ArrowLeft: KeyTable.XK_Left, ArrowRight: KeyTable.XK_Right, ArrowUp: KeyTable.XK_Up, ArrowDown: KeyTable.XK_Down };
+    if (!novnc) return;
+    const K = novnc.KeyTable;
+    const special = { Enter: K.XK_Return, Tab: K.XK_Tab, Escape: K.XK_Escape,
+      ArrowLeft: K.XK_Left, ArrowRight: K.XK_Right, ArrowUp: K.XK_Up, ArrowDown: K.XK_Down };
     if (special[e.key]) {
       e.preventDefault();
       press(special[e.key]);
@@ -505,7 +532,7 @@ function setupKeyboard() {
 // ---------------------------------------------------------------------------------- stop
 
 async function stopEverything() {
-  const session = current?.session || readStore(sessionStorage, SESSION_KEY);
+  const session = current?.session || readStore("sessionStorage", SESSION_KEY);
   leavePlayer();
   homeMsg("Stopping…");
   $("running-card").hidden = true;
@@ -518,7 +545,7 @@ async function stopEverything() {
       /* already gone, or unreachable: the relay stops it below */
     }
   }
-  writeStore(sessionStorage, SESSION_KEY, null);
+  writeStore("sessionStorage", SESSION_KEY, null);
   if (!haveToken()) {
     homeMsg(shutDown ? "Stopped." : "Could not stop it: no Modal token in Settings.", shutDown ? "ok" : "error");
     return;
@@ -558,7 +585,7 @@ function init() {
     $("show-secret").textContent = input.type === "password" ? "Show" : "Hide";
   });
   $("forget").addEventListener("click", () => {
-    writeStore(localStorage, SETTINGS_KEY, null);
+    writeStore("localStorage", SETTINGS_KEY, null);
     settings = defaults();
     $("settings").close();
     homeMsg("Saved settings and token removed from this browser.", "ok");
@@ -599,7 +626,7 @@ function init() {
   setupKeyboard();
 
   showView("home");
-  const saved = readStore(sessionStorage, SESSION_KEY);
+  const saved = readStore("sessionStorage", SESSION_KEY);
   if (saved?.url) {
     enterPlayer(saved); // a reload while playing: pick the same session back up
   } else {
