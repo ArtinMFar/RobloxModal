@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta name="theme-color" content="#0f1115">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>Roblox on Modal</title>
+  <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="assets/style.css">
+  <script type="module" src="assets/app.js"></script>
+</head>
+<body>
+  <!-- Home: launch, reconnect, stop -->
+  <main id="home" class="home">
+    <header class="topbar">
+      <div class="brand"><img src="assets/icon.svg" alt="" width="28" height="28"> Roblox on Modal</div>
+      <button id="open-settings" class="icon-btn" title="Settings" aria-label="Settings">
+        <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M19.14 12.94a7.3 7.3 0 0 0 .05-.94 7.3 7.3 0 0 0-.05-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7 7 0 0 0-1.63-.94l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.59.24-1.13.56-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.66 8.84a.5.5 0 0 0 .12.64l2.03 1.58a7.3 7.3 0 0 0 0 1.88l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32c.13.22.39.3.6.22l2.39-.96c.5.38 1.04.7 1.63.94l.36 2.54c.05.24.25.42.5.42h3.84c.25 0 .45-.18.5-.42l.36-2.54c.59-.24 1.13-.56 1.63-.94l2.39.96c.22.08.47 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z"/></svg>
+        <span>Settings</span>
+      </button>
+    </header>
+
+    <section class="hero">
+      <h1>Play Roblox from a Modal container</h1>
+      <p class="lede">Roblox's Android client runs through <a href="https://github.com/luohoa97/cordial" target="_blank" rel="noopener">Cordial</a> on CPU cores in your own Modal workspace and streams to this page. Your Modal account pays for the time it runs.</p>
+
+      <div id="summary" class="summary"></div>
+
+      <div id="running-card" class="card warn" hidden>
+        <div>
+          <strong>A session is still running</strong>
+          <p id="running-text" class="muted"></p>
+        </div>
+        <div class="row">
+          <button id="reconnect" class="btn primary">Reconnect</button>
+          <button id="stop-running" class="btn danger">Stop it</button>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button id="play" class="btn primary big">
+          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>
+          Load Roblox
+        </button>
+        <button id="stop-home" class="btn danger big" title="Stop every session on this Modal account">
+          <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M6 6h12v12H6z"/></svg>
+          Stop
+        </button>
+      </div>
+      <p id="home-msg" class="msg" role="status"></p>
+    </section>
+
+    <section class="notes">
+      <details>
+        <summary>How it works, and what it costs</summary>
+        <ul>
+          <li><strong>Load Roblox</strong> sends your Modal token to this site's relay, which starts a container in <em>your</em> Modal workspace. The first launch builds the image (about 5–10 minutes) and downloads Roblox (about 230 MB) once. Later launches take under a minute.</li>
+          <li>There is no GPU: Modal's GPU containers can't present graphics, so Roblox draws with Mesa on the CPU cores you choose. More cores means a smoother picture.</li>
+          <li><strong>Stop</strong> shuts the container down and billing stops. If you just close the tab, the session stops itself after the idle time in Settings (10 minutes by default), and in any case after the maximum session length.</li>
+          <li>Sign in with a Roblox account you don't mind risking: Cordial is an unofficial client.</li>
+          <li>There is no sound.</li>
+        </ul>
+      </details>
+    </section>
+    <footer class="foot muted">Not affiliated with Roblox or Modal. Cordial is GPL-3.0; noVNC is MPL-2.0. <a href="https://github.com/ArtinMFar/RobloxModal" target="_blank" rel="noopener">Source</a></footer>
+  </main>
+
+  <!-- Launching -->
+  <section id="launch" class="launch" hidden>
+    <div class="launch-box">
+      <div class="spinner" aria-hidden="true"></div>
+      <h2 id="launch-title">Starting</h2>
+      <p id="launch-text" class="muted"></p>
+      <p id="launch-time" class="muted small"></p>
+      <details id="launch-log-wrap"><summary>Log</summary><pre id="launch-log"></pre></details>
+      <button id="cancel-launch" class="btn danger">Stop</button>
+    </div>
+  </section>
+
+  <!-- Playing -->
+  <section id="player" class="player" hidden>
+    <div id="screen" class="screen"></div>
+    <div id="touch-layer" class="touch-layer" hidden></div>
+    <div id="player-overlay" class="player-overlay" hidden>
+      <div class="launch-box">
+        <div id="overlay-spinner" class="spinner" aria-hidden="true"></div>
+        <h2 id="overlay-title"></h2>
+        <p id="overlay-text" class="muted"></p>
+        <div class="row center">
+          <button id="restart" class="btn primary" hidden>Restart Roblox</button>
+          <button id="overlay-stop" class="btn danger">Stop</button>
+        </div>
+      </div>
+    </div>
+    <div id="rotate-hint" class="rotate-hint">Turn your phone sideways</div>
+    <div id="toolbar" class="toolbar">
+      <button id="tb-toggle" class="tb-btn" title="Menu" aria-label="Menu">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="currentColor" d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+      </button>
+      <div id="tb-items" class="tb-items" hidden>
+        <button id="tb-keyboard" class="tb-btn" title="Keyboard">Keyboard</button>
+        <button id="tb-fullscreen" class="tb-btn" title="Fullscreen">Fullscreen</button>
+        <button id="tb-restart" class="tb-btn" title="Restart Roblox">Restart</button>
+        <button id="tb-leave" class="tb-btn" title="Back to the menu; the session keeps running">Menu</button>
+        <button id="tb-stop" class="tb-btn danger" title="Stop the session">Stop</button>
+      </div>
+    </div>
+    <input id="kbd-input" class="kbd-input" type="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-label="Keyboard input">
+  </section>
+
+  <!-- Settings -->
+  <dialog id="settings" class="settings">
+    <form id="settings-form" method="dialog">
+      <h2>Settings</h2>
+
+      <fieldset>
+        <legend>Controls</legend>
+        <div class="seg" role="radiogroup">
+          <label><input type="radio" name="mode" value="pc"><span><strong>PC</strong><small>Keyboard and mouse: WASD to move, space to jump, right-drag to turn the camera</small></span></label>
+          <label><input type="radio" name="mode" value="mobile"><span><strong>Mobile</strong><small>Touch: Roblox's own thumbstick and jump button</small></span></label>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>CPU cores</legend>
+        <div class="cpu-row">
+          <input id="cpu" name="cpu" type="range" min="2" max="32" step="1">
+          <output id="cpu-out" for="cpu"></output>
+        </div>
+        <p id="cost" class="muted small"></p>
+      </fieldset>
+
+      <fieldset>
+        <legend>Modal token</legend>
+        <p class="muted small">Create one at <a href="https://modal.com/settings/tokens" target="_blank" rel="noopener">modal.com/settings/tokens</a>. Your token stays in this browser, and is sent to the relay only to start and stop sessions. Anyone holding it can run things on your Modal account.</p>
+        <label class="field">Token ID
+          <input id="token-id" name="tokenId" type="text" placeholder="ak-..." autocomplete="off" spellcheck="false">
+        </label>
+        <label class="field">Token secret
+          <span class="secret">
+            <input id="token-secret" name="tokenSecret" type="password" placeholder="as-..." autocomplete="off" spellcheck="false">
+            <button id="show-secret" type="button" class="btn ghost small">Show</button>
+          </span>
+        </label>
+      </fieldset>
+
+      <details class="advanced">
+        <summary>Advanced</summary>
+        <label class="field">Stop after this many minutes with nobody watching
+          <input id="idle" name="idleMinutes" type="number" min="2" max="120" step="1">
+        </label>
+        <label class="field">Maximum session length (hours)
+          <input id="max-hours" name="maxHours" type="number" min="0.5" max="24" step="0.5">
+        </label>
+        <label class="field">Picture quality (0-9)
+          <input id="quality" name="quality" type="number" min="0" max="9" step="1">
+        </label>
+        <label class="field">Relay URL
+          <input id="relay" name="relay" type="url" spellcheck="false">
+        </label>
+        <button id="forget" type="button" class="btn ghost small">Forget saved settings</button>
+      </details>
+
+      <p id="settings-msg" class="msg" role="status"></p>
+      <div class="row end">
+        <button id="settings-cancel" type="button" class="btn ghost">Cancel</button>
+        <button id="settings-save" type="submit" class="btn primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>
